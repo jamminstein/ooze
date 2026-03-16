@@ -117,6 +117,10 @@ end
 -- row-7 hold detection
 local r7_press_time = {}
 
+-- clock IDs for cleanup
+local ghost_echo_clock_id = nil
+local blink_clock_id = nil
+
 -- forward declarations
 local redraw, grid_redraw
 
@@ -460,16 +464,16 @@ redraw = function()
   else
     local ls = lb.loop_state
     local label
-    if     ls == "recording"       then label = "⬤ loop rec"
+    if     ls == "recording"       then label = "* loop rec"
     elseif ls == "processing_loop" then label = "normalizing + xfade…"
     elseif ls == "playing"         then
       local rate_str = ""
       if lb.loop_rate and math.abs(lb.loop_rate - 1.0) > 0.002 then
         local cents = math.floor(math.log(lb.loop_rate) / math.log(2) * 1200)
-        rate_str = "  " .. (cents > 0 and "+" or "") .. cents .. "¢"
+        rate_str = "  " .. (cents > 0 and "+" or "") .. cents .. "c"
       end
-      label = "▶ loop  " .. string.format("%.2fs", lb.duration) .. rate_str
-    elseif ls == "overdubbing"     then label = "⬤ overdub"
+      label = "> loop  " .. string.format("%.2fs", lb.duration) .. rate_str
+    elseif ls == "overdubbing"     then label = "* overdub"
     elseif lb.recorded then
       label = string.format("%.2fs", lb.duration)
       if lb.from_disk then label = label .. "  [disk]" end
@@ -489,7 +493,7 @@ redraw = function()
     end
     screen.level(lv)
     screen.move(4 + (i-1)*15, 36)
-    screen.text(banks[i].recorded and "▪" or "·")
+    screen.text(banks[i].recorded and "#" or ".")
   end
 
   -- modifiers line
@@ -659,7 +663,7 @@ function init()
   end
 
   -- ghost echo decay — 20fps
-  clock.run(function()
+  ghost_echo_clock_id = clock.run(function()
     while true do
       clock.sleep(1 / GHOST_FPS)
       local any = false
@@ -676,7 +680,7 @@ function init()
   end)
 
   -- blink clock for recording / loop indicators
-  clock.run(function()
+  blink_clock_id = clock.run(function()
     while true do
       clock.sleep(0.28)
       blink_on = not blink_on
@@ -699,5 +703,9 @@ function init()
 end
 
 function cleanup()
+  -- Cancel all clock runs
+  if rec_clock_id then clock.cancel(rec_clock_id) end
+  if ghost_echo_clock_id then clock.cancel(ghost_echo_clock_id) end
+  if blink_clock_id then clock.cancel(blink_clock_id) end
   -- SC engine frees all synths and buffers on unload
 end
