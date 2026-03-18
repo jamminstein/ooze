@@ -132,7 +132,7 @@ local function col_to_rate(col, row_mult)
   local idx     = (col - 1) % n
   local oct     = math.floor((col - 1) / n)
   local st      = ivs[idx + 1] + (oct * 12) + pitch_shift
-  return math.pow(2.0, st / 12.0) * (row_mult or 1.0)
+  return (2.0 ^ (st / 12.0)) * (row_mult or 1.0)
 end
 
 local function add_ghost(x, y, bri, decay_sec)
