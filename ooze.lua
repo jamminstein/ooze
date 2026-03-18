@@ -33,13 +33,13 @@
 engine.name = "Ooze"
 local musicutil = require "musicutil"
 
--- ─── grid ─────────────────────────────────────────────────────────────────
+-- ─── grid ───────────────────────────────────────────────────────────────────────────
 local g = grid.connect()
 
--- ─── MIDI ─────────────────────────────────────────────────────────────────
+-- ─── MIDI ───────────────────────────────────────────────────────────────────────────
 local midi_in = nil
 
--- ─── constants ────────────────────────────────────────────────────────────
+-- ─── constants ────────────────────────────────────────────────────────────────────────
 local NUM_BANKS  = 8
 local NUM_COLS   = 16
 local MAX_REC    = 20       -- one-shot max duration (seconds)
@@ -52,7 +52,7 @@ local SNAP_TOL   = 0.08     -- tempo snap tolerance (8% → max ~1.3 semitones s
 -- brightness palette
 local B = { off=0, ghost=1, dim=3, low=5, mid=8, high=11, full=15 }
 
--- ─── play rows ────────────────────────────────────────────────────────────
+-- ─── play rows ────────────────────────────────────────────────────────────────────────
 -- { rate_mult, atk, dec, rev, dist, label, base_brightness }
 local ROWS = {
   { 1.00, 0.002, 0.18, 0.00, 0.00, "PUNCH", B.high },  -- 1: dry crack
@@ -63,7 +63,7 @@ local ROWS = {
   { 1.00, 0.010, 1.10, 0.22, 0.00, "HARM",  B.low  },  -- 6: harmonic stack
 }
 
--- ─── scales (semitone intervals from root) ────────────────────────────────
+-- ─── scales (semitone intervals from root) ───────────────────────────────────────────
 local SCALES = {
   { name="CHROM",  intervals={0,1,2,3,4,5,6,7,8,9,10,11} },
   { name="MAJOR",  intervals={0,2,4,5,7,9,11}             },
@@ -75,7 +75,7 @@ local SCALES = {
 }
 local current_scale = 2   -- start on MAJOR
 
--- ─── state ────────────────────────────────────────────────────────────────
+-- ─── state ───────────────────────────────────────────────────────────────────────────
 local play_bank    = 1
 local record_bank  = 1
 local pitch_shift  = 0       -- semitones ±12
@@ -89,6 +89,9 @@ local rev_on     = false   -- reverse
 local bits_on    = false   -- bitcrush
 local thresh_arm = false   -- threshold auto-record
 local loop_mode  = false   -- loop mode for record bank
+local glut_on    = false   -- glut granular mode
+local drone_on   = false   -- sine drone layer
+local drone_root = 220.0   -- drone fundamental Hz
 
 -- one-shot recording
 local rec_state      = "idle"  -- "idle" | "recording" | "processing"
@@ -131,7 +134,7 @@ local blink_clock_id = nil
 -- forward declarations
 local redraw, grid_redraw
 
--- ─── helpers ──────────────────────────────────────────────────────────────
+-- ─── helpers ───────────────────────────────────────────────────────────────────────────
 
 local function snap_rate_to_semitone(rate)
   -- Snap rate to nearest semitone
@@ -194,7 +197,7 @@ local function tempo_snap_rate(dur_sec, bpm)
   return 1.0, dur_sec, 0.0
 end
 
--- ─── one-shot recording ───────────────────────────────────────────────────
+-- ─── one-shot recording ───────────────────────────────────────────────────────────────────────
 
 local function finalize_rec(bank)
   rec_state = "processing"
@@ -236,7 +239,7 @@ local function stop_recording()
   finalize_rec(record_bank)
 end
 
--- ─── playback ─────────────────────────────────────────────────────────────
+-- ─── playback ───────────────────────────────────────────────────────────────────────────
 
 local function do_play(col, row_idx)
   if not banks[play_bank].recorded then return end
@@ -256,7 +259,10 @@ local function do_play(col, row_idx)
   local crush = bits_on and 0.78 or 0.0
   local rflag = rev_on  and 1    or 0
 
-  if gran_on then
+  if glut_on then
+    local pos = (col - 1) / (NUM_COLS - 1)
+    engine.play_glut(play_bank-1, pos, 1.0, dec * 0.5, 20.0, rate, 0.0, 0.3, amp, rev)
+  elseif gran_on then
     engine.play_gran(play_bank-1, rate, amp*0.88, rev, dist, crush, dec * 1.6)
   else
     engine.play(play_bank-1, rate, amp, atk, dec, rev, dist, crush, rflag)
@@ -296,7 +302,7 @@ local function play_harmonics(col)
   add_ghost(col, 6, B.full, 1.4)
 end
 
--- ─── loop mode ────────────────────────────────────────────────────────────
+-- ─── loop mode ──────────────────────────────────────────────────────────────────────────
 
 local function loop_rec_toggle()
   local bank = record_bank
@@ -365,7 +371,7 @@ local function loop_clear(bank)
   redraw(); grid_redraw()
 end
 
--- ─── unified REC action ───────────────────────────────────────────────────
+-- ─── unified REC action ───────────────────────────────────────────────────────────────────────
 
 local function handle_rec()
   if loop_mode then
@@ -379,7 +385,7 @@ local function handle_rec()
   end
 end
 
--- ─── grid rendering ─────────────────────────────────────────────────────────
+-- ─── grid rendering ────────────────────────────────────────────────────────────────────────────
 
 grid_redraw = function()
   if not g then return end
@@ -449,7 +455,9 @@ grid_redraw = function()
   g:led(3,  8, gran_on    and B.full or B.dim)  -- GRN
   g:led(4,  8, rev_on     and B.full or B.dim)  -- REV
   g:led(5,  8, bits_on    and B.full or B.dim)  -- BIT
+  g:led(2,  8, drone_on   and B.full or B.dim)  -- DRONE
   g:led(7,  8, thresh_arm and B.full or B.dim)  -- THR
+  g:led(9,  8, glut_on    and B.full or B.dim)  -- GLUT
   g:led(10, 8, loop_mode  and B.full or B.dim)  -- LOOP
   -- DUB (only lit when loop playing or overdubbing)
   if loop_mode then
@@ -464,7 +472,7 @@ grid_redraw = function()
   g:refresh()
 end
 
--- ─── screen rendering ─────────────────────────────────────────────────────
+-- ─── screen rendering ────────────────────────────────────────────────────────────────────────
 
 redraw = function()
   screen.clear()
@@ -527,6 +535,8 @@ redraw = function()
 
   -- modifiers line
   local mods = {}
+  if glut_on    then table.insert(mods, "GLUT") end
+  if drone_on   then table.insert(mods, "DRONE") end
   if gran_on    then table.insert(mods, "GRN")  end
   if rev_on     then table.insert(mods, "REV")  end
   if bits_on    then table.insert(mods, "BIT")  end
@@ -551,7 +561,7 @@ redraw = function()
   screen.update()
 end
 
--- ─── grid input ───────────────────────────────────────────────────────────
+-- ─── grid input ─────────────────────────────────────────────────────────────────────────────
 
 g.key = function(x, y, z)
   -- rows 1–5: one-shots
@@ -589,6 +599,19 @@ g.key = function(x, y, z)
     if x == 1 then
       handle_rec()
 
+    elseif x == 2 then
+      drone_on = not drone_on
+      if drone_on then
+        local ratios = {1.0, 2.0, 3.0, 4.0}
+        for i=0,3 do
+          engine.sine_hz(i, drone_root * ratios[i+1])
+          engine.sine_vol(i, 0.18 - i * 0.04)
+        end
+      else
+        for i=0,3 do engine.sine_vol(i, 0) end
+      end
+      redraw(); grid_redraw()
+
     elseif x == 3 then
       gran_on = not gran_on; redraw(); grid_redraw()
 
@@ -604,6 +627,9 @@ g.key = function(x, y, z)
       else               engine.thresh_stop()
       end
       redraw(); grid_redraw()
+
+    elseif x == 9 then
+      glut_on = not glut_on; redraw(); grid_redraw()
 
     elseif x == 10 then
       loop_mode = not loop_mode
@@ -635,11 +661,17 @@ g.key = function(x, y, z)
   end
 end
 
--- ─── encoders ─────────────────────────────────────────────────────────────
+-- ─── encoders ───────────────────────────────────────────────────────────────────────────
 
 function enc(n, d)
   if     n == 1 then
-    pitch_shift = util.clamp(pitch_shift + d, -12, 12); redraw()
+    pitch_shift = util.clamp(pitch_shift + d, -12, 12)
+    drone_root = 110.0 * (2.0 ^ (pitch_shift / 12.0))
+    if drone_on then
+      local ratios = {1.0, 2.0, 3.0, 4.0}
+      for i=0,3 do engine.sine_hz(i, drone_root * ratios[i+1]) end
+    end
+    redraw()
   elseif n == 2 then
     play_bank = util.clamp(play_bank + d, 1, NUM_BANKS); redraw(); grid_redraw()
   elseif n == 3 then
@@ -647,7 +679,7 @@ function enc(n, d)
   end
 end
 
--- ─── norns keys ───────────────────────────────────────────────────────────
+-- ─── norns keys ──────────────────────────────────────────────────────────────────────────
 
 function key(n, z)
   if z == 0 then return end
@@ -658,7 +690,7 @@ function key(n, z)
   end
 end
 
--- ─── OSC — threshold hit from SC ──────────────────────────────────────────
+-- ─── OSC — threshold hit from SC ───────────────────────────────────────────────────────────────
 
 osc.event = function(path, args, from)
   if path == "/ooze_thresh" and thresh_arm and rec_state == "idle" then
@@ -669,7 +701,7 @@ osc.event = function(path, args, from)
   end
 end
 
--- ─── init ─────────────────────────────────────────────────────────────────
+-- ─── init ─────────────────────────────────────────────────────────────────────────────────
 
 function init()
   util.make_dir(norns.state.data)
@@ -787,5 +819,7 @@ function cleanup()
   if rec_clock_id then clock.cancel(rec_clock_id) end
   if ghost_echo_clock_id then clock.cancel(ghost_echo_clock_id) end
   if blink_clock_id then clock.cancel(blink_clock_id) end
+  -- Fade out drones
+  for i=0,3 do engine.sine_vol(i, 0) end
   -- SC engine frees all synths and buffers on unload
 end

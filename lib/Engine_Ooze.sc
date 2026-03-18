@@ -11,6 +11,7 @@ Engine_Ooze : CroneEngine {
   var loopPlaySynths; // per-bank continuous loop playback synth
   var loopRecSynths;  // per-bank loop record / overdub synth
   var threshSynth;    // single threshold detector
+  var sineSynths;     // 4 persistent sine drone synths
   var numBanks, bufDur, luaAddr;
 
   *new { arg context, doneCallback;
@@ -31,7 +32,7 @@ Engine_Ooze : CroneEngine {
     loopRecSynths  = Array.newClear(numBanks);
     threshSynth    = nil;
 
-    // ─── ONE-SHOT RECORDING ────────────────────────────────────────────────────
+    // ─── ONE-SHOT RECORDING ───────────────────────────────────────────────────────────────────────────
     SynthDef(\ooze_rec, {
       arg buf = 0, gate = 1;
       var sig = SoundIn.ar([0, 1]).mean;
@@ -39,7 +40,7 @@ Engine_Ooze : CroneEngine {
       RecordBuf.ar(sig * env, buf, loop: 0, doneAction: Done.none);
     }).add;
 
-    // ─── ONE-SHOT PLAYBACK ─────────────────────────────────────────────────────
+    // ─── ONE-SHOT PLAYBACK ───────────────────────────────────────────────────────────────────────────
     // rate    : playback rate (pitch shift as 2^(n/12))
     // reverse : 0=forward 1=backward (reads from tail with negative rate)
     // crush   : 0–1, sample-rate reduction (bitcrush character)
@@ -73,7 +74,7 @@ Engine_Ooze : CroneEngine {
       Out.ar(out, sig);
     }).add;
 
-    // ─── GRANULAR PLAYBACK ─────────────────────────────────────────────────────
+    // ─── GRANULAR PLAYBACK ───────────────────────────────────────────────────────────────────────────
     // TGrains with wandering position, randomised grain size & pan.
     // Stereo output; reverb applied via mono mix + duplicate.
     SynthDef(\ooze_gran, {
@@ -116,7 +117,7 @@ Engine_Ooze : CroneEngine {
       Out.ar(out, sig);
     }).add;
 
-    // ─── BUFFER CROSSFADE ──────────────────────────────────────────────────────
+    // ─── BUFFER CROSSFADE ──────────────────────────────────────────────────────────────────────────
     // Bakes a linear crossfade into the buffer after recording stops.
     // Blends the TAIL (fading out) into the HEAD (fading in) so the loop
     // point is seamless.  Runs for exactly xfade_frames samples then frees.
@@ -133,7 +134,7 @@ Engine_Ooze : CroneEngine {
       Line.kr(0, 1, xfade_frames / SampleRate.ir, doneAction: Done.freeSelf);
     }).add;
 
-    // ─── LOOP PLAYBACK ─────────────────────────────────────────────────────────
+    // ─── LOOP PLAYBACK ───────────────────────────────────────────────────────────────────────────
     // rate: tempo-correction multiplier (1.0 = original, <1 = slightly slow,
     //       >1 = slightly fast).  Max useful range ±8% = inaudible pitch shift.
     SynthDef(\ooze_loop_play, {
@@ -144,7 +145,7 @@ Engine_Ooze : CroneEngine {
       Out.ar(out, sig ! 2);
     }).add;
 
-    // ─── LOOP RECORD / OVERDUB ─────────────────────────────────────────────────
+    // ─── LOOP RECORD / OVERDUB ──────────────────────────────────────────────────────────────────────
     // pre_level=0 → overwrite   pre_level=1 → overdub
     // loop=1 so RecordBuf wraps indefinitely until freed
     SynthDef(\ooze_loop_rec, {
@@ -154,7 +155,7 @@ Engine_Ooze : CroneEngine {
       RecordBuf.ar(sig * env, buf, rec_level, pre_level, 1, 1, doneAction: Done.none);
     }).add;
 
-    // ─── THRESHOLD DETECTOR ────────────────────────────────────────────────────
+    // ─── THRESHOLD DETECTOR ──────────────────────────────────────────────────────────────────────────
     // Fires once when input amplitude crosses thresh, then resets.
     // SendReply → OSCdef → Lua via port 10111.
     SynthDef(\ooze_thresh, {
@@ -165,6 +166,37 @@ Engine_Ooze : CroneEngine {
       SendReply.kr(gate, '/ooze_thresh_sc', [level]);
     }).add;
 
+    // ─── SINE DRONE ───────────────────────────────────────────────────────────────────────────────
+    SynthDef(\ooze_sine, {
+      arg out=0, hz=220, vol=0.0, pan=0.0,
+          fm_ratio=2.0, fm_index=0.0, vol_lag=0.5;
+      var mod = SinOsc.ar(hz * fm_ratio) * hz * fm_index;
+      var car = SinOsc.ar(hz + mod) * 0.25;
+      var vol_ = Lag.kr(vol, vol_lag);
+      Out.ar(out, Pan2.ar(car * vol_, pan));
+    }).add;
+
+    // ─── GLUT GRANULAR ─────────────────────────────────────────────────────────────────────────────
+    SynthDef(\ooze_glut, {
+      arg buf=0, out=0, rate=1.0, amp=0.6, rev_mix=0.0,
+          pos=0.0, speed=1.0, jitter=0.3, size=0.12, density=20.0,
+          pitch=1.0, pan=0.0, spread=0.3, envscale=2.0, gate=1;
+      var trig    = Impulse.kr(density);
+      var buf_dur = BufDur.kr(buf);
+      var jitter_sig = TRand.kr(jitter.neg, jitter, trig) * buf_dur.reciprocal;
+      var pan_sig    = TRand.kr(spread.neg, spread, trig);
+      var buf_pos    = Phasor.kr(0, buf_dur.reciprocal / ControlRate.ir * speed, pos, 1.0);
+      var pos_sig    = Wrap.kr(buf_pos + jitter_sig);
+      var sig_l = GrainBuf.ar(1, trig, size, buf, pitch * BufRateScale.kr(buf), pos_sig, 2);
+      var sig_r = GrainBuf.ar(1, trig, size, buf, pitch * BufRateScale.kr(buf), pos_sig, 2);
+      var sig   = Balance2.ar(sig_l, sig_r, pan + pan_sig);
+      var env   = EnvGen.kr(Env.asr(0.05, 1.0, 0.5), gate:gate, timeScale:envscale, doneAction:Done.freeSelf);
+      var mono  = (sig[0] + sig[1]) * 0.5;
+      var verb  = FreeVerb.ar(mono, 1.0, 0.80, 0.55);
+      sig = sig + (verb ! 2 * rev_mix);
+      Out.ar(out, sig * env * amp);
+    }).add;
+
     // SC → Lua relay
     OSCdef(\ooze_thresh_relay, { |msg|
       luaAddr.sendMsg("/ooze_thresh", msg[3]);
@@ -172,9 +204,19 @@ Engine_Ooze : CroneEngine {
 
     s.sync;
 
-    // ─── COMMANDS ────────────────────────────────────────────────────────────
+    // ─── SINE DRONE SYNTHS ────────────────────────────────────────────────────────────────────────
+    sineSynths = Array.fill(4, { |i|
+      Synth(\ooze_sine, [
+        \out, context.out_b.index,
+        \hz, 220.0,
+        \vol, 0.0,
+        \pan, (i - 1.5) / 1.5 * 0.6
+      ], context.xg)
+    });
 
-    // One-shot recording ───────────────────────────────────────────────────
+    // ─── COMMANDS ─────────────────────────────────────────────────────────────────────────────────
+
+    // One-shot recording ───────────────────────────────────────────────────────────────────────
     this.addCommand("rec_start", "i", { arg msg;
       var bank = msg[1].asInteger.clip(0, numBanks - 1);
       if (recSynths[bank].notNil) { recSynths[bank].free };
@@ -191,7 +233,7 @@ Engine_Ooze : CroneEngine {
       bufs[msg[1].asInteger.clip(0, numBanks - 1)].normalize(1.0);
     });
 
-    // One-shot playback ────────────────────────────────────────────────────
+    // One-shot playback ──────────────────────────────────────────────────────────────────────
     // args: bank  rate  amp  atk  dec  rev_mix  dist  crush  reverse
     this.addCommand("play", "ifffffffi", { arg msg;
       var bank = msg[1].asInteger.clip(0, numBanks - 1);
@@ -209,7 +251,7 @@ Engine_Ooze : CroneEngine {
       ], context.xg);
     });
 
-    // Granular playback ────────────────────────────────────────────────────
+    // Granular playback ────────────────────────────────────────────────────────────────────
     // args: bank  rate  amp  rev_mix  dist  crush  dur
     this.addCommand("play_gran", "iffffff", { arg msg;
       var bank = msg[1].asInteger.clip(0, numBanks - 1);
@@ -225,7 +267,7 @@ Engine_Ooze : CroneEngine {
       ], context.xg);
     });
 
-    // Loop record / overdub ────────────────────────────────────────────────
+    // Loop record / overdub ────────────────────────────────────────────────────────────────
     this.addCommand("loop_rec_start", "i", { arg msg;
       var bank = msg[1].asInteger.clip(0, numBanks - 1);
       if (loopRecSynths[bank].notNil) { loopRecSynths[bank].free };
@@ -251,7 +293,7 @@ Engine_Ooze : CroneEngine {
       if (loopRecSynths[bank].notNil) { loopRecSynths[bank].set(\gate, 0); loopRecSynths[bank] = nil };
     });
 
-    // Crossfade bake (run after rec_stop, before play_start) ───────────────
+    // Crossfade bake (run after rec_stop, before play_start) ───────────────────────
     // args: bank  loop_frames  xfade_frames
     this.addCommand("loop_xfade", "iii", { arg msg;
       var bank         = msg[1].asInteger.clip(0, numBanks - 1);
@@ -291,7 +333,7 @@ Engine_Ooze : CroneEngine {
       bufs[bank].zero;
     });
 
-    // Threshold detector ───────────────────────────────────────────────────
+    // Threshold detector ───────────────────────────────────────────────────────────────────────
     this.addCommand("thresh_start", "f", { arg msg;
       if (threshSynth.notNil) { threshSynth.free };
       threshSynth = Synth(\ooze_thresh, [\thresh, msg[1].asFloat], context.xg);
@@ -301,13 +343,39 @@ Engine_Ooze : CroneEngine {
       if (threshSynth.notNil) { threshSynth.free; threshSynth = nil };
     });
 
-    // Disk I/O ─────────────────────────────────────────────────────────────
+    // Disk I/O ─────────────────────────────────────────────────────────────────────────────────
     this.addCommand("save", "is", { arg msg;
       bufs[msg[1].asInteger.clip(0, numBanks - 1)].write(msg[2].asString, "wav", "int16");
     });
 
     this.addCommand("load", "is", { arg msg;
       bufs[msg[1].asInteger.clip(0, numBanks - 1)].read(msg[2].asString);
+    });
+
+    // Sine drone controls ──────────────────────────────────────────────────────────────────────
+    this.addCommand("sine_hz",    "if", { arg msg; sineSynths[msg[1].asInteger.clip(0,3)].set(\hz,       msg[2].asFloat) });
+    this.addCommand("sine_vol",   "if", { arg msg; sineSynths[msg[1].asInteger.clip(0,3)].set(\vol,      msg[2].asFloat) });
+    this.addCommand("sine_pan",   "if", { arg msg; sineSynths[msg[1].asInteger.clip(0,3)].set(\pan,      msg[2].asFloat) });
+    this.addCommand("sine_fm",    "if", { arg msg; sineSynths[msg[1].asInteger.clip(0,3)].set(\fm_index, msg[2].asFloat) });
+    this.addCommand("sine_ratio", "if", { arg msg; sineSynths[msg[1].asInteger.clip(0,3)].set(\fm_ratio, msg[2].asFloat) });
+
+    // Glut granular playback ───────────────────────────────────────────────────────────────────
+    // args: bank, pos, speed, size, density, pitch, pan, spread, amp, rev_mix
+    this.addCommand("play_glut", "ifffffffff", { arg msg;
+      var bank = msg[1].asInteger.clip(0, numBanks - 1);
+      Synth(\ooze_glut, [
+        \buf,     bufs[bank].bufnum,
+        \out,     context.out_b.index,
+        \pos,     msg[2].asFloat,
+        \speed,   msg[3].asFloat,
+        \size,    msg[4].asFloat,
+        \density, msg[5].asFloat,
+        \pitch,   msg[6].asFloat,
+        \pan,     msg[7].asFloat,
+        \spread,  msg[8].asFloat,
+        \amp,     msg[9].asFloat,
+        \rev_mix, msg[10].asFloat
+      ], context.xg);
     });
   }
 
@@ -316,6 +384,7 @@ Engine_Ooze : CroneEngine {
     loopPlaySynths.do { |s| if (s.notNil) { s.free } };
     loopRecSynths.do  { |s| if (s.notNil) { s.free } };
     if (threshSynth.notNil) { threshSynth.free };
+    sineSynths.do     { |s| if (s.notNil) { s.free } };
     bufs.do { |b| b.free };
   }
 }
