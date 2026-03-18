@@ -36,6 +36,9 @@ local musicutil = require "musicutil"
 -- ─── grid ─────────────────────────────────────────────────────────────────
 local g = grid.connect()
 
+-- ─── MIDI ─────────────────────────────────────────────────────────────────
+local midi_in = nil
+
 -- ─── constants ────────────────────────────────────────────────────────────
 local NUM_BANKS  = 8
 local NUM_COLS   = 16
@@ -77,6 +80,8 @@ local play_bank    = 1
 local record_bank  = 1
 local pitch_shift  = 0       -- semitones ±12
 local global_rev   = 0.0     -- additive reverb 0–1
+local overdub_feedback = 0.7 -- overdub pre_level (0–1)
+local rate_lock = false      -- snap rates to musical intervals
 
 -- toggles (row 8)
 local gran_on    = false   -- granular mode
@@ -93,6 +98,7 @@ local blink_on       = false
 
 -- per-bank data
 local banks = {}
+local reverse = {}  -- per-bank reverse state
 for i = 1, NUM_BANKS do
   banks[i] = {
     recorded    = false,
@@ -103,6 +109,7 @@ for i = 1, NUM_BANKS do
     loop_rate   = 1.0,       -- tempo-correction rate (1.0 = no correction)
     loop_target = 0.0,       -- snapped musical duration (seconds)
   }
+  reverse[i] = false
 end
 
 -- ghost echo tables  [row][col] → float brightness / decay-per-frame
@@ -126,13 +133,22 @@ local redraw, grid_redraw
 
 -- ─── helpers ──────────────────────────────────────────────────────────────
 
+local function snap_rate_to_semitone(rate)
+  -- Snap rate to nearest semitone
+  return 2 ^ (math.floor(math.log(rate) / math.log(2) * 12 + 0.5) / 12)
+end
+
 local function col_to_rate(col, row_mult)
   local ivs     = SCALES[current_scale].intervals
   local n       = #ivs
   local idx     = (col - 1) % n
   local oct     = math.floor((col - 1) / n)
   local st      = ivs[idx + 1] + (oct * 12) + pitch_shift
-  return (2.0 ^ (st / 12.0)) * (row_mult or 1.0)
+  local r = (2.0 ^ (st / 12.0)) * (row_mult or 1.0)
+  if rate_lock then
+    r = snap_rate_to_semitone(r)
+  end
+  return r
 end
 
 local function add_ghost(x, y, bri, decay_sec)
@@ -226,6 +242,12 @@ local function do_play(col, row_idx)
   if not banks[play_bank].recorded then return end
   local r     = ROWS[row_idx]
   local rate  = col_to_rate(col, r[1])
+
+  -- Apply reverse if enabled for this bank
+  if reverse[play_bank] then
+    rate = -rate
+  end
+
   local amp   = 0.76
   local atk   = r[2]
   local dec   = r[3]
@@ -246,6 +268,12 @@ end
 local function play_harmonics(col)
   if not banks[play_bank].recorded then return end
   local base   = col_to_rate(col, 1.0)
+
+  -- Apply reverse if enabled for this bank
+  if reverse[play_bank] then
+    base = -base
+  end
+
   local crush  = bits_on and 0.78 or 0.0
   local rflag  = rev_on  and 1    or 0
   local rev    = math.min(1.0, ROWS[6][4] + global_rev * 0.50)
@@ -316,6 +344,7 @@ local function loop_rec_toggle()
 
   elseif ls == "playing" then
     banks[bank].loop_state = "overdubbing"
+    softcut.pre_level(overdub_feedback)
     engine.loop_overdub_on(bank - 1)
 
   elseif ls == "overdubbing" then
@@ -503,6 +532,8 @@ redraw = function()
   if bits_on    then table.insert(mods, "BIT")  end
   if loop_mode  then table.insert(mods, "LOOP") end
   if thresh_arm then table.insert(mods, "THR")  end
+  if reverse[play_bank] then table.insert(mods, "REV-BANK") end
+  if rate_lock  then table.insert(mods, "LOCK")  end
   if #mods > 0 then
     screen.level(8)
     screen.move(64, 45)
@@ -650,6 +681,55 @@ function init()
   params:set_action("transpose", function(v) pitch_shift = v; redraw() end)
   params:add_number("scale_idx", "Scale", 1, #SCALES, 2)
   params:set_action("scale_idx", function(v) current_scale = v; redraw(); grid_redraw() end)
+
+  -- Overdub feedback control
+  params:add_control("overdub_feedback", "Overdub Feedback",
+    controlspec.new(0.0, 1.0, "lin", 0.01, 0.7))
+  params:set_action("overdub_feedback", function(v) overdub_feedback = v end)
+
+  -- Rate lock control
+  params:add_option("rate_lock", "Rate Lock", {"Off", "On"}, 1)
+  params:set_action("rate_lock", function(v) rate_lock = (v == 2); redraw() end)
+
+  -- Per-bank reverse toggles
+  params:add_separator("Bank Reverse")
+  for i = 1, NUM_BANKS do
+    params:add_option("bank_" .. i .. "_reverse", "Bank " .. i .. " Reverse", {"Off", "On"}, 1)
+    local bank_idx = i
+    params:set_action("bank_" .. i .. "_reverse", function(v)
+      reverse[bank_idx] = (v == 2); redraw(); grid_redraw()
+    end)
+  end
+
+  -- MIDI CC mapping
+  params:add_separator("MIDI CC Mapping")
+  params:add_number("cc_grain", "CC Grain Size", 0, 127, 1)
+  params:add_number("cc_density", "CC Density", 0, 127, 2)
+  params:add_number("cc_pitch", "CC Pitch Offset", 0, 127, 74)
+
+  -- MIDI setup
+  midi_in = midi.connect(1)
+  midi_in.event = function(data)
+    local msg = midi.to_msg(data)
+    if msg.type == "cc" then
+      local cc_grain = params:get("cc_grain")
+      local cc_density = params:get("cc_density")
+      local cc_pitch = params:get("cc_pitch")
+
+      if msg.cc == cc_grain then
+        -- CC to grain size (normalize to 0-1 range)
+        -- This would affect granular mode if extended
+      elseif msg.cc == cc_density then
+        -- CC to density-like parameter
+        -- Implementation depends on engine capabilities
+      elseif msg.cc == cc_pitch then
+        -- CC to pitch offset (map 0-127 to -12 to +12 semitones)
+        local new_shift = math.floor((msg.val / 127.0) * 24 - 12 + 0.5)
+        pitch_shift = util.clamp(new_shift, -12, 12)
+        redraw()
+      end
+    end
+  end
 
   -- restore saved banks
   for i = 1, NUM_BANKS do
