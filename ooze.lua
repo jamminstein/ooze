@@ -704,7 +704,6 @@ end
 -- ─── init ─────────────────────────────────────────────────────────────────────────────
 
 function init()
-  clock.cancel_all()
   util.make_dir(norns.state.data)
   audio.level_adc(1)
   audio.level_monitor(0)
@@ -816,8 +815,10 @@ function init()
 end
 
 function cleanup()
-  -- Cancel all clocks
-  clock.cancel_all()
+  -- Cancel tracked clocks
+  if rec_clock_id then clock.cancel(rec_clock_id) end
+  if ghost_echo_clock_id then clock.cancel(ghost_echo_clock_id) end
+  if blink_clock_id then clock.cancel(blink_clock_id) end
   -- Fade out drones
   for i=0,3 do engine.sine_vol(i, 0) end
   -- SC engine frees all synths and buffers on unload
