@@ -132,7 +132,7 @@ local ghost_echo_clock_id = nil
 local blink_clock_id = nil
 
 -- forward declarations
-local redraw, grid_redraw
+local grid_redraw
 
 -- ─── helpers ───────────────────────────────────────────────────────────────────────────
 
