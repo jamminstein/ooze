@@ -661,7 +661,7 @@ g.key = function(x, y, z)
   end
 end
 
--- ─── encoders ───────────────────────────────────────────────────────────────────────────
+-- ─── encoders ───────────────────────────────────────────────────────────────────────
 
 function enc(n, d)
   if     n == 1 then
@@ -679,7 +679,7 @@ function enc(n, d)
   end
 end
 
--- ─── norns keys ──────────────────────────────────────────────────────────────────────────
+-- ─── norns keys ──────────────────────────────────────────────────────────────────────
 
 function key(n, z)
   if z == 0 then return end
@@ -701,9 +701,10 @@ osc.event = function(path, args, from)
   end
 end
 
--- ─── init ─────────────────────────────────────────────────────────────────────────────────
+-- ─── init ─────────────────────────────────────────────────────────────────────────────
 
 function init()
+  clock.cancel_all()
   util.make_dir(norns.state.data)
   audio.level_adc(1)
   audio.level_monitor(0)
@@ -815,10 +816,8 @@ function init()
 end
 
 function cleanup()
-  -- Cancel all clock runs
-  if rec_clock_id then clock.cancel(rec_clock_id) end
-  if ghost_echo_clock_id then clock.cancel(ghost_echo_clock_id) end
-  if blink_clock_id then clock.cancel(blink_clock_id) end
+  -- Cancel all clocks
+  clock.cancel_all()
   -- Fade out drones
   for i=0,3 do engine.sine_vol(i, 0) end
   -- SC engine frees all synths and buffers on unload
